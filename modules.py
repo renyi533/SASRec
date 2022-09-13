@@ -132,6 +132,7 @@ def embedding(inputs,
 
 def multihead_attention(queries, 
                         keys, 
+                        keys_w=None,
                         num_units=None, 
                         num_heads=8, 
                         dropout_rate=0,
@@ -157,6 +158,10 @@ def multihead_attention(queries,
     Returns
       A 3d tensor with shape of (N, T_q, C)  
     '''
+    if keys_w is None:
+        keys_w = tf.ones([tf.shape(keys)[0], tf.shape(keys)[1], 1])
+    keys_w = tf.transpose(keys_w, [0, 2, 1])
+    keys_w = tf.tile(keys_w, [num_heads, 1, 1])
     with tf.variable_scope(scope, reuse=reuse):
         # Set the fall back option for num_units
         if num_units is None:
@@ -197,8 +202,9 @@ def multihead_attention(queries,
    
             paddings = tf.ones_like(masks)*(-2**32+1)
             outputs = tf.where(tf.equal(masks, 0), paddings, outputs) # (h*N, T_q, T_k)
-  
+        
         # Activation
+        outputs *= keys_w
         outputs = tf.nn.softmax(outputs) # (h*N, T_q, T_k)
          
         # Query Masking
@@ -230,6 +236,7 @@ def feedforward(inputs,
                 scope="multihead_attention", 
                 dropout_rate=0.2,
                 is_training=True,
+                use_residual=True,
                 reuse=None):
     '''Point-wise feed forward net.
     
@@ -256,7 +263,8 @@ def feedforward(inputs,
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
         
         # Residual connection
-        outputs += inputs
+        if use_residual:
+            outputs += inputs
         
         # Normalize
         #outputs = normalize(outputs)
