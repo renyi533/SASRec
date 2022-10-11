@@ -9,7 +9,7 @@ def random_neq(l, r, s):
     return t
 
 
-def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_queue, SEED):
+def sample_function(user_train, usernum, itemnum, item_prop, batch_size, maxlen, result_queue, SEED):
     def sample():
 
         user = np.random.randint(1, usernum + 1)
@@ -17,6 +17,8 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
 
         seq = np.zeros([maxlen], dtype=np.int32)
         pos = np.zeros([maxlen], dtype=np.int32)
+        pos_propensity = np.ones([maxlen], dtype=np.float)
+        neg_propensity = np.ones([maxlen], dtype=np.float)
         neg = np.zeros([maxlen], dtype=np.int32)
         nxt = user_train[user][-1]
         idx = maxlen - 1
@@ -25,12 +27,14 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         for i in reversed(user_train[user][:-1]):
             seq[idx] = i
             pos[idx] = nxt
+            pos_propensity[idx] = item_prop[nxt]
             if nxt != 0: neg[idx] = random_neq(1, itemnum + 1, ts)
+            neg_propensity[idx] = item_prop[neg[idx]]            
             nxt = i
             idx -= 1
             if idx == -1: break
 
-        return (user, seq, pos, neg)
+        return (user, seq, pos, neg, pos_propensity, neg_propensity)
 
     np.random.seed(SEED)
     while True:
@@ -42,7 +46,7 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
 
 
 class WarpSampler(object):
-    def __init__(self, User, usernum, itemnum, batch_size=64, maxlen=10, n_workers=1):
+    def __init__(self, User, usernum, itemnum, item_prop, batch_size=64, maxlen=10, n_workers=1):
         self.result_queue = Queue(maxsize=n_workers * 10)
         self.processors = []
         for i in range(n_workers):
@@ -50,6 +54,7 @@ class WarpSampler(object):
                 Process(target=sample_function, args=(User,
                                                       usernum,
                                                       itemnum,
+                                                      item_prop,
                                                       batch_size,
                                                       maxlen,
                                                       self.result_queue,

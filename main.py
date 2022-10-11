@@ -35,6 +35,8 @@ parser.add_argument('--dataset', required=True)
 parser.add_argument('--model', default='SASRec', type=str)
 parser.add_argument('--model_dir', default='./tmp_model/', type=str)
 parser.add_argument('--main_loss', default='point', type=str)
+parser.add_argument('--int_match_loss', default='point', type=str)
+parser.add_argument('--ipw_loss', default='point', type=str)
 parser.add_argument('--train_dir', required=True)
 parser.add_argument('--batch_size', default=128, type=int)
 parser.add_argument('--temper', default=2, type=int)
@@ -48,28 +50,26 @@ parser.add_argument('--u_hidden_units', default=4, type=int)
 parser.add_argument('--num_blocks', default=2, type=int)
 parser.add_argument('--num_epochs', default=201, type=int)
 parser.add_argument('--num_heads', default=1, type=int)
+parser.add_argument('--eval_interval', default=20, type=int)
 parser.add_argument('--dropout_rate', default=0.5, type=float)
 parser.add_argument('--l2_emb', default=0.0, type=float)
 parser.add_argument('--norm', default=True, type=str2bool)
 parser.add_argument('--debias', default=False, type=str2bool)
-parser.add_argument('--dynamic_seq_weight', default=0, type=int)
 parser.add_argument('--ortho_loss_w', default=0.5, type=float)
 parser.add_argument('--pop_loss_w', default=0.02, type=float)
-parser.add_argument('--int_loss_w', default=0, type=float)
-parser.add_argument('--int_match_loss_w', default=0.02, type=float)
 parser.add_argument('--pop_match_loss_w', default=0.02, type=float)
-parser.add_argument('--int_pop_match_loss_w', default=0, type=float)
-parser.add_argument('--int_pop_match_loss_type', default=0, type=int)
+parser.add_argument('--int_match_loss_w', default=0.02, type=float)
+parser.add_argument('--ipw_reg_loss_w', default=0.0, type=float)
+parser.add_argument('--ipw_distillation_loss_w', default=0.00, type=float)
 parser.add_argument('--c0', default=0.0, type=float)
-parser.add_argument('--c1', default=1.0, type=float)
 parser.add_argument('--disentangle', default=False, type=str2bool)
 parser.add_argument('--pop_match_tower', default=True, type=str2bool)
 parser.add_argument('--dynamic_pop_int_weight', default=False, type=str2bool)
 parser.add_argument('--enable_u', default=0, type=int)
 parser.add_argument('--backbone', default=0, type=int)
-parser.add_argument('--adversarial', default=False, type=str2bool)
 parser.add_argument('--additive_bias', default=True, type=str2bool)
-
+parser.add_argument('--ipw_min', default=0.1, type=float)
+parser.add_argument('--ipw_factor', default=0.5, type=float)
 
 def init_model(session, saver, args):
     if args.model_dir.find('tmp_model') == -1:
@@ -94,7 +94,7 @@ args = parser.parse_args()
 #f.close()
 
 dataset = data_partition(args.dataset, args.mintestlen)
-[user_train, user_valid, user_test, usernum, itemnum, User, Item] = dataset
+[user_train, user_valid, user_test, usernum, itemnum, User, Item, item_prop] = dataset
 num_batch = len(user_train) // args.batch_size
 cc = 0.0
 for u in user_train:
@@ -109,18 +109,31 @@ for u in user_valid:
         cc += len(user_train[u])
 print ('average sequence length with test: %.2f, test user count: %d' % (cc / test_u, test_u))
 
+total_interactions = 0
 user_int_cnt = []
 for u in User:
     user_int_cnt.append(len(User[u]))
+    total_interactions += len(User[u])
 print('user gini index:%.4f' % gini(user_int_cnt))
 
 item_int_cnt = []
 for i in Item:
     item_int_cnt.append(len(Item[i]))
 print('item gini index:%.4f' % gini(item_int_cnt))
+
+prop0 = 0.0
+prop1 = 0.0
+for i in Item:
+    if item_prop[i] < 0.01:
+        prop0 += 1
+    
+    if item_prop[i] < 0.05:
+        prop1 += 1  
+        
+print('total interactions:%d; original propensity <0.01 ratio:%.4f, <0.05 ratio:%.4f' % (total_interactions, prop0/itemnum, prop1/itemnum))  
 #f = open(os.path.join(args.dataset + '_' + args.train_dir, 'log.txt'), 'w')
 
-sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
+sampler = WarpSampler(user_train, usernum, itemnum, item_prop, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
 
 model = Model(usernum, itemnum, args)    
 
@@ -150,6 +163,22 @@ u_best_epoch2 = 0
 u_final_test_ndcg2 = 0.0
 u_final_test_hr2 = 0.0
 
+ipw_final_val_ndcg = 0.0
+ipw_final_val_hr = 0.0
+ipw_final_test_ndcg = 0.0
+ipw_final_test_hr = 0.0
+ipw_best_epoch = 0
+
+ipw_u_final_val_ndcg = 0.0
+ipw_u_final_val_hr = 0.0
+ipw_u_final_test_ndcg = 0.0
+ipw_u_final_test_hr = 0.0
+ipw_u_best_epoch = 0
+
+ipw_u_best_epoch2 = 0
+ipw_u_final_test_ndcg2 = 0.0
+ipw_u_final_test_hr2 = 0.0
+
 temper = args.temper
 global_step = 0
 
@@ -164,11 +193,13 @@ with tf.Session(config=config) as sess:
         T += t1
         
         print ('Initial Evaluating')
-        t_test = evaluate(model, dataset, args, sess)
-        t_valid = evaluate_valid(model, dataset, args, sess)
+        t_test, ipw_t_test = evaluate(model, dataset, args, sess, False)
+        t_valid, ipw_t_valid = evaluate(model, dataset, args, sess, True)
         print ('')
-        print ('epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
+        print ('model results epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
         0, T, t_valid[0], t_valid[1], t_valid[2], t_valid[3], t_test[0], t_test[1], t_test[2], t_test[3]))
+        print ('ipw model results epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
+        0, T, ipw_t_valid[0],ipw_t_valid[1],ipw_t_valid[2],ipw_t_valid[3],ipw_t_test[0],ipw_t_test[1],ipw_t_test[2],ipw_t_test[3]))
         u_best_epoch = 0
         u_final_val_ndcg = t_valid[2]
         u_final_val_hr = t_valid[3]
@@ -183,6 +214,18 @@ with tf.Session(config=config) as sess:
         final_test_ndcg = t_test[0]
         final_test_hr = t_test[1]
 
+        ipw_u_final_val_ndcg =ipw_t_valid[2]
+        ipw_u_final_val_hr =ipw_t_valid[3]
+        ipw_u_final_test_ndcg =ipw_t_test[2]
+        ipw_u_final_test_hr =ipw_t_test[3]
+        ipw_u_best_epoch2 = 0
+        ipw_u_final_test_ndcg2 =ipw_t_test[2]
+        ipw_u_final_test_hr2 =ipw_t_test[3]
+        ipw_best_epoch = 0
+        ipw_final_val_ndcg =ipw_t_valid[0]
+        ipw_final_val_hr =ipw_t_valid[1]
+        ipw_final_test_ndcg =ipw_t_test[0]
+        ipw_final_test_hr =ipw_t_test[1]
     try:
         for epoch in range(1, args.num_epochs + 1):
             print('start epoch: %d' % epoch)
@@ -191,26 +234,30 @@ with tf.Session(config=config) as sess:
                     print('global step equal to expected epoches')
                     break
                 
-                u, seq, pos, neg = sampler.next_batch()
-                global_step, auc, main_auc, main2_auc, pop_auc, pop_match_auc, int_auc, int_pop_match_auc, loss, main_loss, pop_loss, pop_match_loss, int_match_loss, ortho_loss, int_loss, int_pop_match_loss, int_pop_match_kl_loss, _ = \
-                    sess.run([model.global_step, model.auc, model.main_auc, model.main2_auc, model.pop_auc, model.pop_match_auc, model.int_auc, model.int_pop_match_auc, model.loss, model.main_loss, model.pop_loss, model.pop_match_loss, model.int_match_loss, model.ortho_loss, model.int_loss, model.int_pop_match_loss, model.int_pop_match_kl_loss, model.train_op],
-                                        {model.u: u, model.input_seq: seq, model.pos: pos, model.neg: neg,
+                u, seq, pos, neg, pos_propensity, neg_propensity = sampler.next_batch()
+                global_step, auc, main_auc, int_match_auc, pop_auc, pop_match_auc, ipw_auc, loss, main_loss, pop_loss, ipw_loss, ortho_loss, ipw_distillation_loss, ipw_reg_loss, int_match_loss, pop_match_loss, _ = \
+                    sess.run([model.global_step, model.auc, model.main_auc, model.int_match_auc, model.pop_auc, model.pop_match_auc, model.ipw_auc, model.loss, model.main_loss, model.pop_loss, model.ipw_loss, model.ortho_loss, model.ipw_distillation_loss, model.ipw_reg_loss, model.int_match_loss, model.pop_match_loss, model.train_op],
+                                        {model.u: u, model.input_seq: seq, model.pos: pos, model.neg: neg, model.pos_propensity: pos_propensity, model.neg_propensity: neg_propensity,
                                         model.is_training: True})
                 if global_step % 100 == 0:    
-                    print('global_step:%d, auc:%.4f, main_auc:%.4f, int_match_auc:%.4f, pop_auc:%.4f, pop_match_auc:%.4f, int_auc:%.4f, int_pop_match_auc:%.4f, loss:%.4f, main_loss:%.4f, pop_loss:%.4f, pop_match_loss:%.4f, int_match_loss:%.4f, ortho_loss:%.4f, int_loss:%.4f, int_pop_match_loss:%.4f, int_pop_match_kl_loss:%.4f' % 
-                        (global_step, auc, main_auc, main2_auc, pop_auc, pop_match_auc, int_auc, int_pop_match_auc, loss, main_loss, pop_loss, pop_match_loss, int_match_loss, ortho_loss, int_loss, int_pop_match_loss, int_pop_match_kl_loss))
-
+                    print('global_step:{}, auc:{}, main_auc:{}, int_match_auc:{}, pop_auc:{}, pop_match_auc:{}, ipw_auc:{}, \
+                           loss:{}, main_loss:{}, pop_loss:{}, ipw_loss:{}, \
+                           ortho_loss:{}, ipw_distillation_loss:{}, ipw_reg_loss:{}, int_match_loss:{}, pop_match_loss:{}'.format(\
+                            global_step, auc, main_auc, int_match_auc, pop_auc, pop_match_auc, ipw_auc, loss, main_loss, pop_loss, ipw_loss,\
+                                ortho_loss, ipw_distillation_loss, ipw_reg_loss, int_match_loss, pop_match_loss).strip())
             
-            if epoch % 20 == 0 or global_step >= num_batch * args.num_epochs:
+            if epoch % args.eval_interval == 0 or global_step >= num_batch * args.num_epochs:
                 t1 = time.time() - t0
                 T += t1
                 
                 print ('Evaluating')
-                t_test = evaluate(model, dataset, args, sess)
-                t_valid = evaluate_valid(model, dataset, args, sess)
+                t_test, ipw_t_test = evaluate(model, dataset, args, sess, False)
+                t_valid, ipw_t_valid = evaluate(model, dataset, args, sess, True)
                 print ('')
-                print ('epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
-                epoch, T, t_valid[0], t_valid[1], t_valid[2], t_valid[3], t_test[0], t_test[1], t_test[2], t_test[3]))
+                print ('model results epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
+                       epoch, T, t_valid[0], t_valid[1], t_valid[2], t_valid[3], t_test[0], t_test[1], t_test[2], t_test[3]))
+                print ('ipw model results epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f, U_NDCG@10: %.4f, U_HR@10: %.4f)' % (
+                       epoch, T, ipw_t_valid[0],ipw_t_valid[1],ipw_t_valid[2],ipw_t_valid[3],ipw_t_test[0],ipw_t_test[1],ipw_t_test[2],ipw_t_test[3]))
                 temper = temper - 1
                 if t_valid[2] > u_final_val_ndcg:
                     u_best_epoch = epoch
@@ -234,7 +281,25 @@ with tf.Session(config=config) as sess:
                     final_val_hr = t_valid[1]
                     final_test_ndcg = t_test[0]
                     final_test_hr = t_test[1]
-                    
+
+                if ipw_t_valid[2] > ipw_u_final_val_ndcg:
+                    ipw_u_best_epoch = epoch
+                    ipw_u_final_val_ndcg = ipw_t_valid[2]
+                    ipw_u_final_val_hr = ipw_t_valid[3]
+                    ipw_u_final_test_ndcg = ipw_t_test[2]
+                    ipw_u_final_test_hr = ipw_t_test[3]
+                            
+                if ipw_t_test[2] > ipw_u_final_test_ndcg2:
+                    ipw_u_best_epoch2 = epoch
+                    ipw_u_final_test_ndcg2 = ipw_t_test[2]
+                    ipw_u_final_test_hr2 = ipw_t_test[3]
+                                
+                if ipw_t_valid[0] > ipw_final_val_ndcg:
+                    ipw_best_epoch = epoch
+                    ipw_final_val_ndcg = ipw_t_valid[0]
+                    ipw_final_val_hr = ipw_t_valid[1]
+                    ipw_final_test_ndcg = ipw_t_test[0]
+                    ipw_final_test_hr = ipw_t_test[1]                   
                 #f.write(str(t_valid) + ' ' + str(t_test) + '\n')
                 #f.flush()
                 t0 = time.time()
@@ -248,8 +313,11 @@ with tf.Session(config=config) as sess:
         exit(1)
 
     print("Done")
-    print('best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f). unbiased best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f), unbiased best epoch for test:%d, test (NDCG@10: %.4f, HR@10: %.4f)' % (
-                best_epoch, final_val_ndcg, final_val_hr, final_test_ndcg, final_test_hr, u_best_epoch, u_final_val_ndcg, u_final_val_hr, u_final_test_ndcg, u_final_test_hr, u_best_epoch2, u_final_test_ndcg2, u_final_test_hr2))
+    model_result = 'model best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f). unbiased best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f), unbiased best epoch for test:%d, test (NDCG@10: %.4f, HR@10: %.4f)' % (
+                best_epoch, final_val_ndcg, final_val_hr, final_test_ndcg, final_test_hr, u_best_epoch, u_final_val_ndcg, u_final_val_hr, u_final_test_ndcg, u_final_test_hr, u_best_epoch2, u_final_test_ndcg2, u_final_test_hr2)
+    ipw_model_result = ' ipw model best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f). unbiased best epoch:%d, valid((NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f), unbiased best epoch for test:%d, test (NDCG@10: %.4f, HR@10: %.4f)' % (
+                ipw_best_epoch,ipw_final_val_ndcg,ipw_final_val_hr,ipw_final_test_ndcg,ipw_final_test_hr,ipw_u_best_epoch,ipw_u_final_val_ndcg,ipw_u_final_val_hr,ipw_u_final_test_ndcg,ipw_u_final_test_hr,ipw_u_best_epoch2,ipw_u_final_test_ndcg2,ipw_u_final_test_hr2)
+    print(model_result + ipw_model_result)
     #f.close()
     sampler.close()
 
