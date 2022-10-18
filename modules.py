@@ -7,7 +7,7 @@ https://www.github.com/kyubyong/transformer
 '''
 
 from __future__ import print_function
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import numpy as np
 
 
@@ -118,7 +118,7 @@ def embedding(inputs,
                                        dtype=tf.float32,
                                        shape=[vocab_size, num_units],
                                        #initializer=tf.contrib.layers.xavier_initializer(),
-                                       regularizer=tf.contrib.layers.l2_regularizer(l2_reg))
+                                       regularizer=tf.keras.regularizers.l2(l2_reg))
         if zero_pad:
             lookup_table = tf.concat((tf.zeros(shape=[1, num_units]),
                                       lookup_table[1:, :]), 0)
@@ -255,11 +255,13 @@ def feedforward(inputs,
         params = {"inputs": inputs, "filters": num_units[0], "kernel_size": 1,
                   "activation": tf.nn.relu, "use_bias": True}
         outputs = tf.layers.conv1d(**params)
+        #outputs = tf.layers.dense(inputs, num_units[0], activation=tf.nn.relu)
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
         # Readout layer
         params = {"inputs": outputs, "filters": num_units[1], "kernel_size": 1,
                   "activation": None, "use_bias": True}
         outputs = tf.layers.conv1d(**params)
+        #outputs = tf.layers.dense(outputs, num_units[1], activation=None)
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
         
         # Residual connection

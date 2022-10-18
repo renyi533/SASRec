@@ -16,8 +16,9 @@ class Model(object):
         causal_scope = 'causal_scope'
         ipw_scope = 'ipw_scope'
         print(args)
-        mask = tf.expand_dims(tf.to_float(tf.not_equal(self.input_seq, 0)), -1)        
-        with tf.variable_scope(args.model, reuse=reuse):
+        mask = tf.expand_dims(tf.to_float(tf.not_equal(self.input_seq, 0)), -1)       
+        #reuse = tf.AUTO_REUSE 
+        with tf.variable_scope(args.model, reuse=tf.AUTO_REUSE):
             seq, seq_pop, pos_emb, pos_pop_emb, neg_emb, neg_pop_emb, item_emb_table, pos_ortho_loss, neg_ortho_loss = \
                 self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, args.disentangle, causal_scope)
             self.seq = seq

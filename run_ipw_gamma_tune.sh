@@ -9,7 +9,7 @@ wait_function () {
         wait $job || let "FAIL+=1"
     done
 }
-
+set -x
 while [ $i -lt $iter ]
 do
 
@@ -24,6 +24,7 @@ do
         python main.py --dataset=${dataset} --train_dir=default --hidden_units=50 --u_hidden_units=6 --maxlen=${maxlen} --dropout_rate=${dropout} --model=${model} --num_epochs=${epoch} --c0=30 --disentangle=True --debias=True --additive_bias=False --pop_loss_w=0.02 --dynamic_pop_int_weight=True --pop_match_loss_w=0.002 --int_match_loss_w=0.002 --pop_match_tower=True > logs_ipw_t/${dataset}_${model}_dist_ipw_0.002_$i.log 2>&1 &
 
         python main.py --dataset=${dataset} --train_dir=default --hidden_units=50 --u_hidden_units=6 --maxlen=${maxlen} --dropout_rate=${dropout} --model=${model} --num_epochs=${epoch} --c0=30 --disentangle=True --debias=True --additive_bias=False --pop_loss_w=0.02 --dynamic_pop_int_weight=True --pop_match_loss_w=0.02 --int_match_loss_w=0.02 --pop_match_tower=True > logs_ipw_t/${dataset}_${model}_dist_ipw_0.02_$i.log 2>&1 &
+        wait_function
 
         python main.py --dataset=${dataset} --train_dir=default --hidden_units=50 --u_hidden_units=6 --maxlen=${maxlen} --dropout_rate=${dropout} --model=${model} --num_epochs=${epoch} --c0=30 --disentangle=True --debias=True --additive_bias=False --pop_loss_w=0.02 --dynamic_pop_int_weight=True --pop_match_loss_w=0.2 --int_match_loss_w=0.2 --pop_match_tower=True > logs_ipw_t/${dataset}_${model}_dist_ipw_0.2_$i.log 2>&1 &
 

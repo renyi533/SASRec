@@ -57,17 +57,16 @@ def gini(x):
         total += np.sum(np.abs(xi - x[i:]))
     return total / (len(x)**2 * np.mean(x))
 
-def evaluate(model, dataset, args, sess, is_valid, full_test=True):
+def evaluate(model, dataset, args, sess, eval_k, is_valid, full_test=True):
     [train, valid, test, usernum, itemnum, User, Item, item_prop] = copy.deepcopy(dataset)
-
-    NDCG = 0.0
-    W_NDCG = 0.0
-    HT = 0.0
-    W_HT = 0.0
-    IPW_NDCG = 0.0
-    IPW_W_NDCG = 0.0
-    IPW_HT = 0.0
-    IPW_W_HT = 0.0
+    NDCG = np.array([0.0] * len(eval_k))
+    W_NDCG = np.array([0.0] * len(eval_k))
+    HT = np.array([0.0] * len(eval_k))
+    W_HT = np.array([0.0] * len(eval_k))
+    IPW_NDCG = np.array([0.0] * len(eval_k))
+    IPW_W_NDCG = np.array([0.0] * len(eval_k))
+    IPW_HT = np.array([0.0] * len(eval_k))
+    IPW_W_HT = np.array([0.0] * len(eval_k))
     valid_user = 0.0
     total_w = 0.0
     if usernum>10000 and (not full_test):
@@ -126,7 +125,7 @@ def evaluate(model, dataset, args, sess, is_valid, full_test=True):
         valid_user += 1
 
         if valid_user % 1000 == 0:
-            ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item)
+            ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
             set_u.clear()
             set_w.clear()
             set_seq.clear()
@@ -143,7 +142,7 @@ def evaluate(model, dataset, args, sess, is_valid, full_test=True):
             sys.stdout.flush()
             
     if len(set_u) > 0:
-        ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item)
+        ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
         NDCG += ndcg
         W_NDCG += w_ndcg
         HT += ht
@@ -153,34 +152,56 @@ def evaluate(model, dataset, args, sess, is_valid, full_test=True):
         IPW_HT += ipw_ht
         IPW_W_HT += ipw_w_ht      
     
-    return (NDCG / valid_user, HT / valid_user, W_NDCG / total_w, W_HT/total_w), \
-        (IPW_NDCG / valid_user, IPW_HT / valid_user, IPW_W_NDCG / total_w, IPW_W_HT/total_w)
+    NDCG = NDCG / valid_user
+    HT = HT / valid_user
+    W_NDCG = W_NDCG / total_w
+    W_HT = W_HT/total_w
+    IPW_NDCG = IPW_NDCG / valid_user
+    IPW_HT = IPW_HT / valid_user
+    IPW_W_NDCG = IPW_W_NDCG / total_w
+    IPW_W_HT = IPW_W_HT/total_w    
+    #print(valid_user, total_w, NDCG, HT, W_NDCG, W_HT, IPW_NDCG, IPW_HT, IPW_W_NDCG, IPW_W_HT)
+    return (list(NDCG), list(HT), list(W_NDCG), list(W_HT)), \
+        (list(IPW_NDCG), list(IPW_HT), list(IPW_W_NDCG), list(IPW_W_HT))
 
-def compute_metric(model, sess, set_u, set_w, set_seq, set_test_item):
+def compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k):
     predictions, ipw_predictions = model.predict(sess, set_u, set_seq, set_test_item)
     predictions = np.negative(predictions)
     ipw_predictions = np.negative(ipw_predictions)
-    NDCG_10, W_NDCG_10, HT_10, W_HT_10 = calc_metric(predictions, set_w)
-    IPW_NDCG_10, IPW_W_NDCG_10, IPW_HT_10, IPW_W_HT_10 = calc_metric(ipw_predictions, set_w)
+    NDCG_10, W_NDCG_10, HT_10, W_HT_10 = calc_metric(predictions, set_w, eval_k)
+    IPW_NDCG_10, IPW_W_NDCG_10, IPW_HT_10, IPW_W_HT_10 = calc_metric(ipw_predictions, set_w, eval_k)
     return NDCG_10, W_NDCG_10, HT_10, W_HT_10, IPW_NDCG_10, IPW_W_NDCG_10, IPW_HT_10, IPW_W_HT_10
 
-def calc_metric(predictions, set_w):
+def calc_metric(predictions, set_w, eval_k):
     ranks = predictions.argsort().argsort()[:, 0]
     ndcgs = 1 / np.log2(ranks + 2)
     ones = np.ones_like(ndcgs, dtype=float)
     zeros = np.zeros_like(ndcgs)
     
-    ndcg_10 = np.where(ranks < 10, ndcgs, zeros)
-    ht_10 = np.where(ranks <10, ones, zeros)
+    NDCG = []
+    W_NDCG = []
+    HT = []
+    W_HT = []
     
-    w_ndcg_10 = set_w * ndcg_10
-    w_ht_10 = set_w * ht_10
-    NDCG_10 = np.sum(ndcg_10)
-    W_NDCG_10 = np.sum(w_ndcg_10)
-    HT_10 = np.sum(ht_10)
-    W_HT_10 = np.sum(w_ht_10)
-    return NDCG_10, W_NDCG_10, HT_10, W_HT_10
+    for k in eval_k:
+        ndcg, w_ndcg, ht, w_ht = calc_metric_at_k(set_w, k, ranks, ndcgs, ones, zeros)
+        NDCG.append(ndcg)
+        W_NDCG.append(w_ndcg)
+        HT.append(ht)
+        W_HT.append(w_ht)
+    return np.array(NDCG), np.array(W_NDCG), np.array(HT), np.array(W_HT)
 
+def calc_metric_at_k(set_w, k, ranks, ndcgs, ones, zeros):
+    ndcg = np.where(ranks < k, ndcgs, zeros)
+    ht = np.where(ranks < k, ones, zeros)
+    
+    w_ndcg = set_w * ndcg
+    w_ht = set_w * ht
+    NDCG = np.sum(ndcg)
+    W_NDCG = np.sum(w_ndcg)
+    HT = np.sum(ht)
+    W_HT = np.sum(w_ht)
+    return NDCG, W_NDCG, HT, W_HT
     #NDCG = 0.0
     #W_NDCG = 0.0
     #HT = 0.0
