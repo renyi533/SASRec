@@ -14,7 +14,6 @@ class Model(object):
         pos = self.pos
         neg = self.neg
         causal_scope = 'causal_scope'
-        ipw_scope = 'ipw_scope'
         print(args)
         mask = tf.expand_dims(tf.to_float(tf.not_equal(self.input_seq, 0)), -1)       
         #reuse = tf.AUTO_REUSE 
@@ -23,29 +22,19 @@ class Model(object):
                 self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, args.disentangle, causal_scope)
             self.seq = seq
             self.seq_pop = seq_pop
-            ipw_seq, _, ipw_pos_emb, _, ipw_neg_emb, _, ipw_item_emb_table, _, _ = \
-                self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, False, ipw_scope)
-            self.ipw_seq = ipw_seq
             
             self.test_logits = self.construct_test_logits(args, seq, seq_pop, item_emb_table, args.disentangle, args.debias, causal_scope, reuse)
             
-            self.ipw_test_logits = self.construct_test_logits(args, ipw_seq, ipw_seq, ipw_item_emb_table, False, False, ipw_scope, reuse)
-                                                 
             self.seq = tf.reshape(self.seq, [tf.shape(self.input_seq)[0], args.maxlen, args.hidden_units])
             
             seq_emb = tf.reshape(self.seq, [tf.shape(self.input_seq)[0] * args.maxlen, args.hidden_units])
             seq_pop_emb = tf.reshape(self.seq_pop, [tf.shape(self.input_seq)[0] * args.maxlen, args.hidden_units])
-            ipw_seq_emb = tf.reshape(self.ipw_seq, [tf.shape(self.input_seq)[0] * args.maxlen, args.hidden_units])
             
             # prediction layer
             pos_logits, neg_logits, pos_int_match_logits, neg_int_match_logits, pos_pop_match_logits, neg_pop_match_logits, \
                 pos_pop_logits, neg_pop_logits, seq_pop_logits = \
                     self.construct_train_logits(args, args.disentangle, args.debias, pos_emb, neg_emb, seq_emb, \
                                                 pos_pop_emb, neg_pop_emb, seq_pop_emb, causal_scope, reuse)
-
-            ipw_pos_logits, ipw_neg_logits, _, _, _, _, _, _, _ = \
-                    self.construct_train_logits(args, False, False, ipw_pos_emb, ipw_neg_emb, ipw_seq_emb, \
-                                                None, None, None, ipw_scope, reuse) 
                                    
         # ignore padding items (0)
         istarget = tf.reshape(tf.to_float(tf.not_equal(pos, 0)), [tf.shape(self.input_seq)[0] * args.maxlen])
@@ -56,13 +45,9 @@ class Model(object):
         self.construct_causal_loss(args, pos_logits, neg_logits, istarget, pos_pop_logits, \
             neg_pop_logits, pos_ortho_loss, neg_ortho_loss, pos_int_match_logits, neg_int_match_logits,\
             pos_pop_match_logits, neg_pop_match_logits, pos_propensity, neg_propensity)
-        self.construct_ipw_loss(args, ipw_pos_logits, ipw_neg_logits, istarget, pos_propensity, neg_propensity)
-        self.construct_ipw_reg_loss(args, ipw_pos_logits, ipw_neg_logits, ipw_pos_emb, ipw_neg_emb, \
-            pos_logits, neg_logits, pos_emb, neg_emb, istarget)
             
         tf.summary.scalar('loss', self.loss)
         self.auc = self.compute_auc(pos_logits, neg_logits, pos_propensity, istarget)
-        self.ipw_auc = self.compute_auc(ipw_pos_logits, ipw_neg_logits, pos_propensity, istarget)
         self.main_auc = tf.zeros([])
         self.int_match_auc = tf.zeros([])
         self.pop_auc = tf.zeros([])
@@ -87,30 +72,6 @@ class Model(object):
 
         self.merged = tf.summary.merge_all()
     
-    def construct_ipw_reg_loss(self, args, ipw_pos_logits, ipw_neg_logits, ipw_pos_emb, ipw_neg_emb, \
-            pos_logits, neg_logits, pos_emb, neg_emb, istarget):
-        ipw_pos_logits = tf.stop_gradient(ipw_pos_logits)
-        ipw_neg_logits = tf.stop_gradient(ipw_neg_logits)
-        ipw_pos_emb = tf.stop_gradient(ipw_pos_emb)
-        ipw_neg_emb = tf.stop_gradient(ipw_neg_emb)
-
-        ipw_pos_prob = tf.sigmoid(ipw_pos_logits)
-        ipw_neg_prob = tf.sigmoid(ipw_neg_logits)
-        pos_prob = tf.sigmoid(pos_logits)
-        neg_prob = tf.sigmoid(neg_logits)
-        
-        ce_loss =  -ipw_pos_prob * tf.log((pos_prob+1e-24))   
-        ce_loss +=  -(1 - ipw_pos_prob) * tf.log(1.0 - pos_prob + 1e-24)   
-        ce_loss +=  -ipw_neg_prob * tf.log((neg_prob+1e-24))   
-        ce_loss +=  -(1 - ipw_neg_prob) * tf.log(1.0 - neg_prob + 1e-24) 
-        self.ipw_distillation_loss = tf.reduce_sum(ce_loss * istarget) / tf.reduce_sum(istarget)
-        self.loss += args.ipw_distillation_loss_w * self.ipw_distillation_loss
-        
-        mse_loss = tf.reduce_sum(tf.math.square(ipw_pos_emb-pos_emb), axis=-1)
-        mse_loss += tf.reduce_sum(tf.math.square(ipw_neg_emb-neg_emb), axis=-1)
-        self.ipw_reg_loss = tf.reduce_sum(mse_loss * istarget) / tf.reduce_sum(istarget)
-        self.loss += args.ipw_reg_loss_w * self.ipw_reg_loss
-    
     def compute_auc(self, pos_logits, neg_logits, pos_propensity, istarget):
         auc = tf.reduce_sum(
                 ((tf.sign((pos_logits) - (neg_logits)) + 1) / 2) * istarget
@@ -121,18 +82,6 @@ class Model(object):
                         ) / tf.reduce_sum(istarget / pos_propensity)
         return auc, u_auc
             
-    def construct_ipw_loss(self, args, ipw_pos_logits, ipw_neg_logits, istarget, pos_propensity, neg_propensity):
-        if args.ipw_loss == 'point':
-            self.ipw_loss = tf.reduce_sum(
-                - tf.log(tf.sigmoid(ipw_pos_logits) + 1e-24) / pos_propensity * istarget -
-                tf.log(1 - tf.sigmoid(ipw_neg_logits) + 1e-24) / neg_propensity * istarget
-            ) / tf.reduce_sum(istarget)
-        else:
-            self.ipw_loss = tf.reduce_sum(
-                - tf.log(tf.sigmoid(ipw_pos_logits - ipw_neg_logits) + 1e-24) * istarget / pos_propensity
-            ) / tf.reduce_sum(istarget)
-        self.loss += self.ipw_loss
-        
     def construct_causal_loss(self, args, pos_logits, neg_logits, istarget, pos_pop_logits, \
         neg_pop_logits, pos_ortho_loss, neg_ortho_loss, pos_int_match_logits, neg_int_match_logits,\
             pos_pop_match_logits, neg_pop_match_logits, pos_propensity, neg_propensity):
@@ -480,7 +429,7 @@ class Model(object):
         return tf.reduce_mean(dot / (tf.math.sqrt(self_dot0) * tf.math.sqrt(self_dot1) + 1e-24))
         
     def predict(self, sess, u, seq, item_idx):
-        return sess.run([self.test_logits, self.ipw_test_logits],
+        return sess.run(self.test_logits,
                         {self.u: u, self.input_seq: seq, self.test_item: item_idx, self.is_training: False})
 
     def sas_seq_gen(self, seq, mask, args, reuse, seq_w):

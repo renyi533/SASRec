@@ -63,10 +63,6 @@ def evaluate(model, dataset, args, sess, eval_k, is_valid, full_test=True):
     W_NDCG = np.array([0.0] * len(eval_k))
     HT = np.array([0.0] * len(eval_k))
     W_HT = np.array([0.0] * len(eval_k))
-    IPW_NDCG = np.array([0.0] * len(eval_k))
-    IPW_W_NDCG = np.array([0.0] * len(eval_k))
-    IPW_HT = np.array([0.0] * len(eval_k))
-    IPW_W_HT = np.array([0.0] * len(eval_k))
     valid_user = 0.0
     total_w = 0.0
     if usernum>10000 and (not full_test):
@@ -125,7 +121,7 @@ def evaluate(model, dataset, args, sess, eval_k, is_valid, full_test=True):
         valid_user += 1
 
         if valid_user % 1000 == 0:
-            ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
+            ndcg, w_ndcg, ht, w_ht  = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
             set_u.clear()
             set_w.clear()
             set_seq.clear()
@@ -134,43 +130,28 @@ def evaluate(model, dataset, args, sess, eval_k, is_valid, full_test=True):
             W_NDCG += w_ndcg
             HT += ht
             W_HT += w_ht
-            IPW_NDCG += ipw_ndcg
-            IPW_W_NDCG += ipw_w_ndcg
-            IPW_HT += ipw_ht
-            IPW_W_HT += ipw_w_ht
             print ('.', end="")
             sys.stdout.flush()
             
     if len(set_u) > 0:
-        ndcg, w_ndcg, ht, w_ht, ipw_ndcg, ipw_w_ndcg, ipw_ht, ipw_w_ht = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
+        ndcg, w_ndcg, ht, w_ht  = compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k)
         NDCG += ndcg
         W_NDCG += w_ndcg
         HT += ht
         W_HT += w_ht
-        IPW_NDCG += ipw_ndcg
-        IPW_W_NDCG += ipw_w_ndcg
-        IPW_HT += ipw_ht
-        IPW_W_HT += ipw_w_ht      
     
     NDCG = NDCG / valid_user
     HT = HT / valid_user
     W_NDCG = W_NDCG / total_w
     W_HT = W_HT/total_w
-    IPW_NDCG = IPW_NDCG / valid_user
-    IPW_HT = IPW_HT / valid_user
-    IPW_W_NDCG = IPW_W_NDCG / total_w
-    IPW_W_HT = IPW_W_HT/total_w    
     #print(valid_user, total_w, NDCG, HT, W_NDCG, W_HT, IPW_NDCG, IPW_HT, IPW_W_NDCG, IPW_W_HT)
-    return (list(NDCG), list(HT), list(W_NDCG), list(W_HT)), \
-        (list(IPW_NDCG), list(IPW_HT), list(IPW_W_NDCG), list(IPW_W_HT))
+    return (list(NDCG), list(HT), list(W_NDCG), list(W_HT))
 
 def compute_metric(model, sess, set_u, set_w, set_seq, set_test_item, eval_k):
-    predictions, ipw_predictions = model.predict(sess, set_u, set_seq, set_test_item)
+    predictions = model.predict(sess, set_u, set_seq, set_test_item)
     predictions = np.negative(predictions)
-    ipw_predictions = np.negative(ipw_predictions)
     NDCG_10, W_NDCG_10, HT_10, W_HT_10 = calc_metric(predictions, set_w, eval_k)
-    IPW_NDCG_10, IPW_W_NDCG_10, IPW_HT_10, IPW_W_HT_10 = calc_metric(ipw_predictions, set_w, eval_k)
-    return NDCG_10, W_NDCG_10, HT_10, W_HT_10, IPW_NDCG_10, IPW_W_NDCG_10, IPW_HT_10, IPW_W_HT_10
+    return NDCG_10, W_NDCG_10, HT_10, W_HT_10
 
 def calc_metric(predictions, set_w, eval_k):
     ranks = predictions.argsort().argsort()[:, 0]
