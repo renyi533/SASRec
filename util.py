@@ -4,7 +4,7 @@ import copy
 import random
 import numpy as np
 from collections import defaultdict
-import pytest
+#import pytest
 
 def data_partition(fname, exp_len):
     usernum = 0

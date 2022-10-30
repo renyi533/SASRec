@@ -1,5 +1,5 @@
 from modules import *
-
+import nextitnet
 
 class Model(object):
     def __init__(self, usernum, itemnum, args, reuse=None):
@@ -14,10 +14,12 @@ class Model(object):
         pos = self.pos
         neg = self.neg
         causal_scope = 'causal_scope'
+        ipw_scope = 'ipw_scope'
         print(args)
         mask = tf.expand_dims(tf.to_float(tf.not_equal(self.input_seq, 0)), -1)       
         #reuse = tf.AUTO_REUSE 
         with tf.variable_scope(args.model, reuse=tf.AUTO_REUSE):
+          if args.mode == 'causal':
             seq, seq_pop, pos_emb, pos_pop_emb, neg_emb, neg_pop_emb, item_emb_table, pos_ortho_loss, neg_ortho_loss = \
                 self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, args.disentangle, causal_scope)
             self.seq = seq
@@ -35,16 +37,42 @@ class Model(object):
                 pos_pop_logits, neg_pop_logits, seq_pop_logits = \
                     self.construct_train_logits(args, args.disentangle, args.debias, pos_emb, neg_emb, seq_emb, \
                                                 pos_pop_emb, neg_pop_emb, seq_pop_emb, causal_scope, reuse)
-                                   
+          elif args.mode == 'ipw':
+            seq, seq_pop, pos_emb, pos_pop_emb, neg_emb, neg_pop_emb, item_emb_table, pos_ortho_loss, neg_ortho_loss = \
+                self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, False, ipw_scope)
+            self.seq = seq
+            self.seq_pop = seq_pop
+            
+            self.test_logits = self.construct_test_logits(args, seq, seq_pop, item_emb_table, False, False, ipw_scope, reuse)
+            
+            self.seq = tf.reshape(self.seq, [tf.shape(self.input_seq)[0], args.maxlen, args.hidden_units])
+            
+            seq_emb = tf.reshape(self.seq, [tf.shape(self.input_seq)[0] * args.maxlen, args.hidden_units])
+            seq_pop_emb = tf.reshape(self.seq_pop, [tf.shape(self.input_seq)[0] * args.maxlen, args.hidden_units])
+            
+            # prediction layer
+            pos_logits, neg_logits, pos_int_match_logits, neg_int_match_logits, pos_pop_match_logits, neg_pop_match_logits, \
+                pos_pop_logits, neg_pop_logits, seq_pop_logits = \
+                    self.construct_train_logits(args, False, False, pos_emb, neg_emb, seq_emb, \
+                                                None, None, None, ipw_scope, reuse)   
+          else:
+            assert False    
+                                  
         # ignore padding items (0)
         istarget = tf.reshape(tf.to_float(tf.not_equal(pos, 0)), [tf.shape(self.input_seq)[0] * args.maxlen])
         pos_propensity = tf.reshape(self.pos_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
         neg_propensity = tf.reshape(self.neg_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
         pos_propensity = tf.maximum(tf.pow(pos_propensity, args.ipw_factor), args.ipw_min)
         neg_propensity = tf.maximum(tf.pow(1 - neg_propensity, args.ipw_factor), args.ipw_min)
-        self.construct_causal_loss(args, pos_logits, neg_logits, istarget, pos_pop_logits, \
-            neg_pop_logits, pos_ortho_loss, neg_ortho_loss, pos_int_match_logits, neg_int_match_logits,\
-            pos_pop_match_logits, neg_pop_match_logits, pos_propensity, neg_propensity)
+        
+        if args.mode == 'causal':
+            self.construct_causal_loss(args, pos_logits, neg_logits, istarget, pos_pop_logits, \
+                neg_pop_logits, pos_ortho_loss, neg_ortho_loss, pos_int_match_logits, neg_int_match_logits,\
+                pos_pop_match_logits, neg_pop_match_logits, pos_propensity, neg_propensity)
+        elif args.mode == 'ipw':
+            self.construct_ipw_loss(args, pos_logits, neg_logits, istarget, pos_propensity, neg_propensity)
+        else:
+            assert False               
             
         tf.summary.scalar('loss', self.loss)
         self.auc = self.compute_auc(pos_logits, neg_logits, pos_propensity, istarget)
@@ -52,7 +80,7 @@ class Model(object):
         self.int_match_auc = tf.zeros([])
         self.pop_auc = tf.zeros([])
         self.pop_match_auc = tf.zeros([])
-        if args.debias:
+        if args.debias and args.mode == 'causal':
             self.pop_auc = self.compute_auc(pos_pop_logits, neg_pop_logits, pos_propensity, istarget)
             
             self.main_auc = self.compute_auc(pos_int_match_logits+pos_pop_match_logits, neg_int_match_logits+neg_pop_match_logits, pos_propensity, istarget)
@@ -105,7 +133,7 @@ class Model(object):
                 tf.log(1 - tf.sigmoid(neg_pop_logits) + 1e-24) * istarget
             ) / tf.reduce_sum(istarget)
             self.pop_loss = pop_loss
-            self.ortho_loss = tf.zeros([]) + pos_ortho_loss + neg_ortho_loss
+            self.ortho_loss = tf.zeros([]) + pos_ortho_loss + neg_ortho_loss + self.user_ortho_loss
             self.loss += args.pop_loss_w * pop_loss
             self.loss += args.ortho_loss_w * (self.ortho_loss)
             if args.disentangle:
@@ -131,7 +159,26 @@ class Model(object):
         reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
         self.reg_loss = sum(reg_losses)
         self.loss += self.reg_loss
-        
+
+    def construct_ipw_loss(self, args, ipw_pos_logits, ipw_neg_logits, istarget, pos_propensity, neg_propensity):
+        if args.main_loss == 'point':
+            self.loss = tf.reduce_sum(
+                - tf.log(tf.sigmoid(ipw_pos_logits) + 1e-24) / pos_propensity * istarget -
+                tf.log(1 - tf.sigmoid(ipw_neg_logits) + 1e-24) / neg_propensity * istarget
+            ) / tf.reduce_sum(istarget)
+        else:
+            self.loss = tf.reduce_sum(
+                - tf.log(tf.sigmoid(ipw_pos_logits - ipw_neg_logits) + 1e-24) * istarget / pos_propensity
+            ) / tf.reduce_sum(istarget)
+        self.main_loss = self.loss
+        self.int_match_loss = tf.zeros([])
+        self.pop_match_loss = tf.zeros([])
+        self.pop_loss = tf.zeros([])
+        self.ortho_loss = tf.zeros([])
+        reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        self.reg_loss = sum(reg_losses)
+        self.loss += self.reg_loss
+                
     def construct_train_logits(self, args, disentangle, debias, pos_emb, neg_emb, 
                                seq_emb, pos_pop_emb, neg_pop_emb, seq_pop_emb, scope, reuse):
       with tf.variable_scope(scope, reuse=reuse): 
@@ -239,6 +286,7 @@ class Model(object):
                 pos_ortho_loss = 0.0
                 neg_ortho_loss = 0.0
             
+            self.user_ortho_loss = tf.zeros([])
             if args.enable_u > 0:
                 seq, seq_pop = self.merge_user_seq_emb(args, seq, seq_pop, usernum, reuse)
                 
@@ -322,7 +370,9 @@ class Model(object):
         
         if args.disentangle:
             user, user_pop = self.disentangle_emb(user, args, scope='disentangle_user_emb')
+            self.user_ortho_loss = self.orthogonal_loss(user, user_pop)
         else:
+            self.user_ortho_loss = tf.zeros([])
             if args.u_hidden_units != args.hidden_units:
                 user = tf.layers.dense(user, units=args.hidden_units)
             user_pop = user
@@ -360,6 +410,9 @@ class Model(object):
             elif args.model == 'GRU4Rec':
                 print('GRU4Rec')
                 seq = self.gru_seq_gen(seq_in, mask, args, reuse, seq_w)
+            elif args.model == 'NextItRec':
+                print('NextItRec')
+                seq = self.nextitnet_seq_gen(seq_in, mask, args, reuse, seq_w)
             elif args.model == 'SumPoolingRec':
                 print('SumPoolingRec')
                 seq = self.sumpooling_seq_gen(seq_in, mask, args, reuse, seq_w)
@@ -495,6 +548,22 @@ class Model(object):
         outputs *= mask
         return outputs
 
+    def nextitnet_seq_gen(self, seq, mask, args, reuse, seq_w):
+        # Dropout
+        seq *= seq_w
+        seq = tf.layers.dropout(seq,
+                                rate=args.dropout_rate,
+                                training=tf.convert_to_tensor(self.is_training))
+
+        dilate_input = seq * mask
+        # Build blocks
+        for layer_id, dilation in enumerate(args.next_it_rec_dilation):
+            dilate_input = nextitnet.nextitnet_residual_block_one(dilate_input, dilation,
+                                                        layer_id, args.hidden_units,
+                                                        args.next_it_rec_kernel_size, causal=True, train=True)          
+        outputs = dilate_input * mask
+        return outputs
+    
     def sumpooling_seq_gen(self, seq, mask, args, reuse, seq_w):
         seq *= seq_w
         # Dropout
