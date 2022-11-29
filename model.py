@@ -18,6 +18,10 @@ class Model(object):
         print(args)
         mask = tf.expand_dims(tf.to_float(tf.not_equal(self.input_seq, 0)), -1)       
         #reuse = tf.AUTO_REUSE 
+        pos_propensity = tf.reshape(self.pos_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
+        neg_propensity = tf.reshape(self.neg_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
+        pos_propensity = tf.maximum(tf.pow(pos_propensity, args.ipw_factor), args.ipw_min)
+        neg_propensity = tf.maximum(tf.pow(1 - neg_propensity, args.ipw_factor), args.ipw_min)
         with tf.variable_scope(args.model, reuse=tf.AUTO_REUSE):
           if args.mode == 'causal':
             seq, seq_pop, pos_emb, pos_pop_emb, neg_emb, neg_pop_emb, item_emb_table, pos_ortho_loss, neg_ortho_loss = \
@@ -36,7 +40,7 @@ class Model(object):
             pos_logits, neg_logits, pos_int_match_logits, neg_int_match_logits, pos_pop_match_logits, neg_pop_match_logits, \
                 pos_pop_logits, neg_pop_logits, seq_pop_logits = \
                     self.construct_train_logits(args, args.disentangle, args.debias, pos_emb, neg_emb, seq_emb, \
-                                                pos_pop_emb, neg_pop_emb, seq_pop_emb, causal_scope, reuse)
+                                                pos_pop_emb, neg_pop_emb, seq_pop_emb, pos_propensity, neg_propensity, causal_scope, reuse)
           elif args.mode == 'ipw':
             seq, seq_pop, pos_emb, pos_pop_emb, neg_emb, neg_pop_emb, item_emb_table, pos_ortho_loss, neg_ortho_loss = \
                 self.construct_seq_emb(args, itemnum, usernum, pos, neg, reuse, mask, False, ipw_scope)
@@ -54,16 +58,13 @@ class Model(object):
             pos_logits, neg_logits, pos_int_match_logits, neg_int_match_logits, pos_pop_match_logits, neg_pop_match_logits, \
                 pos_pop_logits, neg_pop_logits, seq_pop_logits = \
                     self.construct_train_logits(args, False, False, pos_emb, neg_emb, seq_emb, \
-                                                None, None, None, ipw_scope, reuse)   
+                                                None, None, None, 1.0, 1.0, ipw_scope, reuse)   
           else:
             assert False    
                                   
         # ignore padding items (0)
         istarget = tf.reshape(tf.to_float(tf.not_equal(pos, 0)), [tf.shape(self.input_seq)[0] * args.maxlen])
-        pos_propensity = tf.reshape(self.pos_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
-        neg_propensity = tf.reshape(self.neg_propensity, [tf.shape(self.input_seq)[0] * args.maxlen])
-        pos_propensity = tf.maximum(tf.pow(pos_propensity, args.ipw_factor), args.ipw_min)
-        neg_propensity = tf.maximum(tf.pow(1 - neg_propensity, args.ipw_factor), args.ipw_min)
+
         
         if args.mode == 'causal':
             self.construct_causal_loss(args, pos_logits, neg_logits, istarget, pos_pop_logits, \
@@ -180,7 +181,8 @@ class Model(object):
         self.loss += self.reg_loss
                 
     def construct_train_logits(self, args, disentangle, debias, pos_emb, neg_emb, 
-                               seq_emb, pos_pop_emb, neg_pop_emb, seq_pop_emb, scope, reuse):
+                               seq_emb, pos_pop_emb, neg_pop_emb, seq_pop_emb, 
+                               pos_propensity, neg_propensity, scope, reuse):
       with tf.variable_scope(scope, reuse=reuse): 
         pos_logits = tf.reduce_sum(pos_emb * seq_emb, -1)
         neg_logits = tf.reduce_sum(neg_emb * seq_emb, -1)
@@ -232,6 +234,9 @@ class Model(object):
             if args.additive_bias:
                 pos_logits += pos_pop_logits #+ seq_pop_logits
                 neg_logits += neg_pop_logits #+ seq_pop_logits
+            elif args.pda_bias:
+                pos_logits = (tf.nn.elu(pos_logits) + 1.0) * pos_propensity
+                neg_logits = (tf.nn.elu(neg_logits) + 1.0) * neg_propensity                 
             else:
                 pos_prob = tf.nn.sigmoid(seq_pop_logits) * tf.nn.sigmoid(pos_pop_logits)
                 neg_prob = tf.nn.sigmoid(seq_pop_logits) * tf.nn.sigmoid(neg_pop_logits)
@@ -347,6 +352,8 @@ class Model(object):
                 last_seq_pop_logits = self.predict_with_popularity_emb(last_seq_pop_emb, args, scope='predict_with_seq_pop_emb')
                 if args.additive_bias:
                     test_logits += args.c0 * test_item_pop_logits
+                elif args.pda_bias:
+                    test_logits = tf.nn.elu(test_logits) + 1.0
                 else:
                     probBias = tf.nn.sigmoid(last_seq_pop_logits) * tf.nn.sigmoid(test_item_pop_logits)
                     test_logits = (test_logits - args.c0) * probBias

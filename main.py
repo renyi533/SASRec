@@ -73,6 +73,7 @@ parser.add_argument('--dynamic_pop_int_weight', default=False, type=str2bool)
 parser.add_argument('--enable_u', default=0, type=int)
 parser.add_argument('--backbone', default=0, type=int)
 parser.add_argument('--additive_bias', default=True, type=str2bool)
+parser.add_argument('--pda_bias', default=False, type=str2bool)
 parser.add_argument('--ipw_min', default=0.1, type=float)
 parser.add_argument('--ipw_factor', default=0.5, type=float)
 
